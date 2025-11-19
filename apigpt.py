@@ -1,19 +1,30 @@
 # File: apigpt.py
+# Run with: python apigpt.py
 
 from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
 import time
-import sys
-import os
 import random
-import math
-from threading import Thread, Lock
+import signal
+import threading
+import queue
+import uuid
 from flask import Flask, request, jsonify
 
-# --- HÀM MÔ PHỎNG HÀNH VI CON NGƯỜI (GIỮ NGUYÊN) ---
+# ----------------------------------------------------------------------
+#                          CẤU HÌNH
+# ----------------------------------------------------------------------
+SESSION_TIMEOUT_MINUTES = 2  # Tăng lên 2 phút để đỡ phải login lại nhiều
+SHUTDOWN_TIMEOUT = SESSION_TIMEOUT_MINUTES * 60
+HEADLESS_MODE = False        # Đặt True nếu chạy trên server không màn hình
+
+# ----------------------------------------------------------------------
+#                  HÀM MÔ PHỎNG HÀNH VI (GIỮ NGUYÊN)
+# ----------------------------------------------------------------------
 
 
 def simulate_human_mouse_movement(page, start_x, start_y, end_x, end_y, duration=1.0):
+    """Simulate human-like mouse movement"""
     num_points = random.randint(10, 20)
     points = []
     for i in range(num_points + 1):
@@ -28,8 +39,8 @@ def simulate_human_mouse_movement(page, start_x, start_y, end_x, end_y, duration
 
 
 def simulate_human_click(page, x, y):
-    current_pos = (random.randint(0, 1920), random.randint(
-        0, 1080))
+    """Simulate human-like clicking"""
+    current_pos = (random.randint(0, 1920), random.randint(0, 1080))
     simulate_human_mouse_movement(
         page, current_pos[0], current_pos[1], x, y, random.uniform(0.5, 1.5))
     time.sleep(random.uniform(0.1, 0.3))
@@ -40,11 +51,12 @@ def simulate_human_click(page, x, y):
 
 
 def simulate_human_typing(page, selector, text):
+    """Simulate human-like typing"""
     page.click(selector)
     time.sleep(random.uniform(0.2, 0.5))
     typed_text = ""
     for char in text:
-        if random.random() < 0.02:
+        if random.random() < 0.02:  # 2% chance of typo
             wrong_char = random.choice("abcdefghijklmnopqrstuvwxyz")
             page.type(selector, wrong_char)
             typed_text += wrong_char
@@ -63,265 +75,279 @@ def simulate_human_typing(page, selector, text):
             time.sleep(random.uniform(0.05, 0.2))
     return typed_text
 
-
-# --- GLOBAL VARIABLES VÀ CÀI ĐẶT THỜI GIAN SỐNG ---
-browser_instance = None
-page_instance = None
-chatgpt_ready = False
-playwright_instance = None
-context_instance = None
-lock = Lock()  # Khóa luồng cho các thao tác Playwright
-
-# 💡 BIẾN CÀI ĐẶT THỜI GIAN SỐNG (ĐƠN VỊ: PHÚT)
-SESSION_TIMEOUT_MINUTES = 10
-# Tính toán thời gian chờ đóng (đơn vị: giây)
-SHUTDOWN_TIMEOUT = SESSION_TIMEOUT_MINUTES * 60
-
-last_activity_time = 0.0  # Timestamp của lần hoạt động cuối cùng
-
-# --- HÀM DỌN DẸP ---
+# ----------------------------------------------------------------------
+#                     BROWSER WORKER (THE CORE FIX)
+# ----------------------------------------------------------------------
+# Lớp này chạy trên 1 luồng riêng biệt. Flask chỉ gửi task vào đây.
 
 
-def shutdown_chatgpt():
-    """Đóng trình duyệt và giải phóng tài nguyên Playwright."""
-    global browser_instance, page_instance, chatgpt_ready, playwright_instance, context_instance, last_activity_time
+class BrowserWorker(threading.Thread):
+    def __init__(self):
+        super().__init__()
+        self.task_queue = queue.Queue()
+        self.daemon = True
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+        self.ready = False
+        self.last_activity = time.time()
+        self.is_running = True
 
-    with lock:
-        if chatgpt_ready:
-            print(
-                f"--- Đã quá {SESSION_TIMEOUT_MINUTES} phút không hoạt động. Đang đóng trình duyệt ChatGPT. ---")
+    def run(self):
+        print("--- Browser Worker Thread Started ---")
+        while self.is_running:
             try:
-                if browser_instance:
-                    browser_instance.close()
-                if playwright_instance:
-                    playwright_instance.stop()
+                # Chờ task tối đa 1 giây, sau đó kiểm tra timeout
+                try:
+                    task = self.task_queue.get(timeout=1.0)
+                except queue.Empty:
+                    self._check_idle_timeout()
+                    continue
+
+                task_type = task.get('type')
+
+                if task_type == 'shutdown_app':
+                    self._shutdown_browser()
+                    self.is_running = False
+                    break
+
+                elif task_type == 'chat':
+                    result_queue = task.get('result_queue')
+                    message = task.get('message')
+                    response = self._process_chat(message)
+                    result_queue.put(response)
+
+                self.task_queue.task_done()
+
             except Exception as e:
-                print(f"Lỗi khi đóng trình duyệt: {e}")
+                print(f"Lỗi Fatal trong Worker Loop: {e}")
 
-            browser_instance = None
-            page_instance = None
-            context_instance = None
-            playwright_instance = None
-            chatgpt_ready = False
-            last_activity_time = 0.0
+    def _check_idle_timeout(self):
+        """Kiểm tra nếu không hoạt động quá lâu thì đóng trình duyệt"""
+        if self.ready and (time.time() - self.last_activity > SHUTDOWN_TIMEOUT):
+            print(
+                f"--- Timeout {SESSION_TIMEOUT_MINUTES}p. Đóng trình duyệt để giải phóng RAM. ---")
+            self._shutdown_browser()
 
-# --- HÀM KHỞI TẠO ON-DEMAND ---
-
-
-def initialize_chatgpt(debugBrowser=False):
-    """Khởi tạo kết nối ChatGPT nếu chưa sẵn sàng."""
-    global browser_instance, page_instance, chatgpt_ready, playwright_instance, context_instance, last_activity_time
-
-    if chatgpt_ready:
-        return True
-
-    with lock:
-        if chatgpt_ready:
+    def _init_browser(self):
+        """Khởi tạo Playwright (Chỉ chạy trong Worker Thread)"""
+        if self.ready:
             return True
 
-        print("--- Không tìm thấy kết nối. Đang khởi tạo ChatGPT... ---")
+        print("--- Đang khởi tạo ChatGPT Browser... ---")
         try:
-            playwright_instance = sync_playwright().start()
-
-            browser_instance = playwright_instance.chromium.launch(
-                headless=not debugBrowser,
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(
+                headless=HEADLESS_MODE,
                 args=[
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-blink-features=AutomationControlled",
                     "--start-maximized",
-                    "--disable-infobars",
-                    "--disable-extensions",
                 ]
             )
 
-            context_instance = browser_instance.new_context(
+            self.context = self.browser.new_context(
                 viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                locale="en-US",
-                timezone_id="America/New_York",
-                java_script_enabled=True,
-                bypass_csp=True,
-                extra_http_headers={
-                    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not=A?Brand";v="24"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"macOS"',
-                    "accept-language": "en-US,en;q=0.9",
-                }
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             )
 
-            page_instance = context_instance.new_page()
-
+            self.page = self.context.new_page()
             stealth = Stealth()
-            stealth.apply_stealth_sync(page_instance)
+            stealth.apply_stealth_sync(self.page)
 
-            print("Accessing https://chatgpt.com ...")
-            page_instance.goto("https://chatgpt.com", timeout=60000)
-            page_instance.wait_for_load_state("domcontentloaded")
-            time.sleep(5)
+            print("Truy cập https://chatgpt.com ...")
+            self.page.goto("https://chatgpt.com", timeout=60000)
 
-            chatgpt_ready = True
-            last_activity_time = time.time()  # Ghi lại thời điểm khởi tạo
-            print(
-                f"--- KHỞI TẠO THÀNH CÔNG! Thời gian chờ là {SESSION_TIMEOUT_MINUTES} phút. ---")
-            return True
-
-        except Exception as e:
-            print(f"Error initializing ChatGPT: {e}")
-            shutdown_chatgpt()
-            return False
-
-# --- HÀM GỬI TIN NHẮN (CẬP NHẬT THỜI GIAN) ---
-
-
-def send_message_to_chatgpt(message):
-    """Gửi tin nhắn và cập nhật thời gian hoạt động."""
-    global last_activity_time
-
-    if not initialize_chatgpt(debugBrowser=False):
-        return "ChatGPT không thể khởi tạo. Vui lòng kiểm tra lỗi."
-
-    with lock:
-        try:
-            # Xử lý login/guest prompt (Giữ nguyên)
+            # Xử lý login Guest nếu có
             try:
-                login_prompt = page_instance.query_selector(
-                    'div.flex.flex-col.items-center.justify-center.px-6.py-8')
-                if login_prompt:
-                    continue_as_guest = login_prompt.query_selector(
-                        'a.cursor-pointer')
-                    if continue_as_guest:
-                        print("Skipping login prompt...")
-                        bbox = continue_as_guest.bounding_box()
-                        if bbox:
-                            center_x = bbox['x'] + bbox['width'] / 2
-                            center_y = bbox['y'] + bbox['height'] / 2
-                            simulate_human_click(
-                                page_instance, center_x, center_y)
-                        else:
-                            continue_as_guest.click()
-                        time.sleep(2)
+                guest_btn = self.page.query_selector(
+                    'div.flex.flex-col.items-center.justify-center >> text=Stay logged out')
+                # Note: Selector guest thay đổi liên tục, dùng try/catch lỏng
+                if not guest_btn:
+                    # Thử tìm nút "Start chatting" hoặc tương tự
+                    pass
             except:
                 pass
 
-            # Gửi tin nhắn và chờ phản hồi (Giữ nguyên)
+            time.sleep(3)
+            self.ready = True
+            self.last_activity = time.time()
+            print("--- Khởi tạo thành công ---")
+            return True
+        except Exception as e:
+            print(f"Lỗi khởi tạo: {e}")
+            self._shutdown_browser()
+            return False
+
+    def _shutdown_browser(self):
+        """Đóng trình duyệt an toàn"""
+        print("--- Đang đóng trình duyệt... ---")
+        if self.context:
             try:
-                page_instance.wait_for_selector(
-                    'div.ProseMirror#prompt-textarea', timeout=5000)
-                simulate_human_typing(
-                    page_instance, 'div.ProseMirror#prompt-textarea', message)
-                send_button = page_instance.query_selector(
-                    'button[data-testid="send-button"]')
-                if send_button:
-                    bbox = send_button.bounding_box()
-                    if bbox:
-                        center_x = bbox['x'] + bbox['width'] / 2
-                        center_y = bbox['y'] + bbox['height'] / 2
-                        simulate_human_click(page_instance, center_x, center_y)
-                    else:
-                        send_button.click()
+                self.context.close()
+            except:
+                pass
+        if self.browser:
+            try:
+                self.browser.close()
+            except:
+                pass
+        if self.playwright:
+            try:
+                self.playwright.stop()
+            except:
+                pass
+
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+        self.ready = False
+
+    def _process_chat(self, message):
+        """Xử lý logic chat"""
+        self.last_activity = time.time()
+
+        # 1. Đảm bảo browser đã mở
+        if not self._init_browser():
+            return {"error": "Không thể khởi tạo trình duyệt"}
+
+        try:
+            page = self.page
+
+            # --- XỬ LÝ TEXTAREA ---
+            # Tăng timeout lên 10s
+            try:
+                textarea = page.wait_for_selector(
+                    'div.ProseMirror#prompt-textarea', state='visible', timeout=10000)
+                if not textarea:
+                    raise Exception("Không tìm thấy ô nhập liệu")
+            except:
+                # Fallback: Đôi khi class thay đổi, thử click vào body rồi tìm lại
+                page.mouse.click(500, 500)
+                textarea = page.wait_for_selector(
+                    '#prompt-textarea', state='visible', timeout=5000)
+
+            simulate_human_typing(
+                page, 'div.ProseMirror#prompt-textarea', message)
+
+            # Click gửi
+            send_btn = page.query_selector('button[data-testid="send-button"]')
+            if send_btn:
+                send_btn.click()
+            else:
+                page.keyboard.press("Enter")
+
+            # --- CHỜ VÀ LẤY PHẢN HỒI ---
+            # Logic: Chờ nút Stop xuất hiện (đang gen) -> Chờ nút Stop biến mất (đã gen xong)
+            try:
+                page.wait_for_selector(
+                    'button[data-testid="stop-button"]', timeout=5000)
+            except:
+                pass  # Có thể nó gen quá nhanh
+
+            # Chờ nút Copy hoặc nút Regenerate xuất hiện (dấu hiệu xong)
+            # Hoặc đơn giản là đợi div markdown prose ổn định
+            time.sleep(2)
+
+            # Tăng timeout chờ phản hồi lên 30s
+            try:
+                page.wait_for_selector('div.markdown.prose', timeout=30000)
+            except:
+                return {"error": "Timeout khi chờ phản hồi từ ChatGPT"}
+
+            # Đợi thêm chút để render hết
+            timeout_count = 0
+            prev_len = 0
+            while timeout_count < 30:  # Đợi tối đa 30s cho việc generate text dài
+                responses = page.query_selector_all('div.markdown.prose')
+                if not responses:
+                    break
+                current_text = responses[-1].inner_text()
+                if len(current_text) > prev_len:
+                    prev_len = len(current_text)
+                    timeout_count = 0  # Reset nếu text vẫn đang dài ra
+                    time.sleep(1)
                 else:
-                    time.sleep(random.uniform(0.2, 0.5))
-                    page_instance.press(
-                        'div.ProseMirror#prompt-textarea', 'Enter')
+                    # Text không đổi trong 1s -> Có thể đã xong
+                    timeout_count += 1
+                    if timeout_count > 2:
+                        break
 
-                # ... (Code chờ phản hồi) ...
-                response_started = False
-                start_time = time.time()
-                timeout = 30
-                try:
-                    page_instance.wait_for_selector(
-                        'button[data-testid="stop-button"]', timeout=5000)
-                    response_started = True
-                    while response_started and (time.time() - start_time) < timeout:
-                        try:
-                            stop_button = page_instance.query_selector(
-                                'button[data-testid="stop-button"]')
-                            if stop_button is None:
-                                response_started = False
-                                break
-                            time.sleep(0.1)
-                        except:
-                            response_started = False
-                            break
-                except:
-                    time.sleep(2)
-
-                try:
-                    page_instance.wait_for_selector(
-                        'div.markdown.prose', timeout=10000)
-                    time.sleep(0.5)
-
-                    response_elements = page_instance.query_selector_all(
-                        'div.markdown.prose')
-
-                    if response_elements:
-                        latest_response = response_elements[-1]
-                        response_text = latest_response.inner_text()
-                    else:
-                        response_text = "Could not find response from ChatGPT."
-
-                    # 💡 CẬP NHẬT THỜI GIAN HOẠT ĐỘNG CUỐI CÙNG
-                    last_activity_time = time.time()
-                    return response_text
-
-                except Exception as response_error:
-                    return f"Could not extract response: {response_error}"
-
-            except Exception as e:
-                return f"Error sending question: {e}"
+            final_responses = page.query_selector_all('div.markdown.prose')
+            if final_responses:
+                return {"response": final_responses[-1].inner_text()}
+            else:
+                return {"error": "Không lấy được nội dung phản hồi"}
 
         except Exception as e:
-            return f"Error communicating with ChatGPT: {e}"
+            print(f"Lỗi trong quá trình chat: {e}")
+            self._shutdown_browser()  # Reset nếu lỗi
+            return {"error": str(e)}
+
+# ----------------------------------------------------------------------
+#                        MAIN FLASK APP
+# ----------------------------------------------------------------------
 
 
-# --- HÀM THEO DÕI THỜI GIAN ---
-def background_timeout_checker():
-    """Luồng nền kiểm tra thời gian không hoạt động và tự động đóng trình duyệt."""
-    while True:
-        time.sleep(5)  # Kiểm tra mỗi 5 giây
-
-        global last_activity_time, chatgpt_ready, SHUTDOWN_TIMEOUT
-
-        # 💡 TÍNH TOÁN LẠI SHUTDOWN_TIMEOUT TRONG VÒNG LẶP (nếu bạn muốn thay đổi runtime)
-        # Nếu không cần thay đổi runtime, bạn có thể bỏ qua dòng này và chỉ dùng SHUTDOWN_TIMEOUT cố định.
-        current_shutdown_timeout = SESSION_TIMEOUT_MINUTES * 60
-
-        if chatgpt_ready and last_activity_time > 0:
-            elapsed_time = time.time() - last_activity_time
-            if elapsed_time > current_shutdown_timeout:
-                shutdown_chatgpt()
-
-
-# --- KHỞI TẠO FLASK APP VÀ ENDPOINT ---
 app = Flask(__name__)
+browser_worker = None
 
 
 @app.route('/chat', methods=['POST'])
-def chat():
-    try:
-        data = request.get_json()
-        if not data or 'message' not in data:
-            return jsonify({'error': 'Missing message in request body'}), 400
+def chat_endpoint():
+    data = request.get_json()
+    if not data or 'message' not in data:
+        return jsonify({'error': 'Missing message'}), 400
 
-        message = data['message']
-        response = send_message_to_chatgpt(message)
-        return jsonify({'response': response})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    message = data['message']
+
+    # Cơ chế giao tiếp Thread-safe:
+    # 1. Tạo hàng đợi kết quả riêng cho request này
+    result_queue = queue.Queue()
+
+    # 2. Gửi task sang Worker Thread
+    browser_worker.task_queue.put({
+        'type': 'chat',
+        'message': message,
+        'result_queue': result_queue
+    })
+
+    # 3. Chờ kết quả (Block request này cho đến khi Worker trả lời)
+    try:
+        # Timeout tổng 120s cho cả quá trình
+        result = result_queue.get(timeout=120)
+        if 'error' in result:
+            return jsonify(result), 500
+        return jsonify(result)
+    except queue.Empty:
+        return jsonify({'error': 'Server busy or timeout'}), 504
 
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ready' if chatgpt_ready else 'idle/initializing'})
+    status = "ready" if browser_worker.ready else "idle"
+    return jsonify({'status': status})
+
+
+def signal_handler(sig, frame):
+    print("\nĐang tắt server...")
+    if browser_worker:
+        browser_worker.task_queue.put({'type': 'shutdown_app'})
+        browser_worker.join(timeout=5)
+    exit(0)
 
 
 if __name__ == "__main__":
-    # KHỞI TẠO LUỒNG KIỂM TRA THỜI GIAN
-    checker_thread = Thread(target=background_timeout_checker, daemon=True)
-    checker_thread.start()
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Khởi chạy Worker Thread
+    browser_worker = BrowserWorker()
+    browser_worker.start()
 
     print(
-        f"Server khởi động. Thời gian chờ hiện tại: {SESSION_TIMEOUT_MINUTES} phút.")
-    # Chạy Flask ở chế độ đơn luồng
-    app.run(host='0.0.0.0', port=5001, debug=False, threaded=False)
+        f"Server chạy port 5001. Timeout phiên: {SESSION_TIMEOUT_MINUTES} phút")
+    # Threaded=True ok vì Browser logic đã tách biệt hoàn toàn
+    app.run(host='0.0.0.0', port=5001, threaded=True)
