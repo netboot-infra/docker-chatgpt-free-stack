@@ -14,9 +14,9 @@ from flask import Flask, request, jsonify
 # ----------------------------------------------------------------------
 #                          CẤU HÌNH
 # ----------------------------------------------------------------------
-SESSION_TIMEOUT_MINUTES = 2  # Tăng lên 2 phút để đỡ phải login lại nhiều
+SESSION_TIMEOUT_MINUTES = 12  # Tăng lên 2 phút để đỡ phải login lại nhiều
 SHUTDOWN_TIMEOUT = SESSION_TIMEOUT_MINUTES * 60
-HEADLESS_MODE = False        # Đặt True nếu chạy trên server không màn hình
+HEADLESS_MODE = True        # Đặt True nếu chạy trên server không màn hình
 
 # ----------------------------------------------------------------------
 #                  HÀM MÔ PHỎNG HÀNH VI (GIỮ NGUYÊN)
