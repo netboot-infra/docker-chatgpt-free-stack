@@ -55,3 +55,32 @@ curl -X POST http://localhost:5001/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello, how are you?"}'
 ```
+
+## Docker
+
+This application can be run as a Docker container.
+
+### Building the Docker Image
+
+```bash
+docker build -t chatgpt-api .
+```
+
+### Running the Docker Container
+
+```bash
+docker run -p 5001:5001 chatgpt-api
+```
+
+The API will be available at `http://localhost:5001`.
+
+### Using Docker Hub
+
+To pull and run the pre-built image from Docker Hub:
+
+```bash
+docker pull your-dockerhub-username/chatgpt-api
+docker run -p 5001:5001 your-dockerhub-username/chatgpt-api
+```
+
+Replace `your-dockerhub-username` with your actual Docker Hub username.
