@@ -12,11 +12,11 @@ import uuid
 from flask import Flask, request, jsonify
 
 # ----------------------------------------------------------------------
-#                          CẤU HÌNH
+#                          CONFIGURATION
 # ----------------------------------------------------------------------
-SESSION_TIMEOUT_MINUTES = 12  # Tăng lên 2 phút để đỡ phải login lại nhiều
+SESSION_TIMEOUT_MINUTES = 12  # Increased to 12 minutes to reduce login frequency
 SHUTDOWN_TIMEOUT = SESSION_TIMEOUT_MINUTES * 60
-HEADLESS_MODE = True        # Đặt True nếu chạy trên server không màn hình
+HEADLESS_MODE = True        # Set to True if running on a server without a display
 
 # ----------------------------------------------------------------------
 #                  HÀM MÔ PHỎNG HÀNH VI (GIỮ NGUYÊN)
@@ -78,7 +78,7 @@ def simulate_human_typing(page, selector, text):
 # ----------------------------------------------------------------------
 #                     BROWSER WORKER (THE CORE FIX)
 # ----------------------------------------------------------------------
-# Lớp này chạy trên 1 luồng riêng biệt. Flask chỉ gửi task vào đây.
+# This class runs on a separate thread. Flask only sends tasks here.
 
 
 class BrowserWorker(threading.Thread):
@@ -98,7 +98,7 @@ class BrowserWorker(threading.Thread):
         print("--- Browser Worker Thread Started ---")
         while self.is_running:
             try:
-                # Chờ task tối đa 1 giây, sau đó kiểm tra timeout
+                # Wait for task up to 1 second, then check timeout
                 try:
                     task = self.task_queue.get(timeout=1.0)
                 except queue.Empty:
@@ -121,21 +121,21 @@ class BrowserWorker(threading.Thread):
                 self.task_queue.task_done()
 
             except Exception as e:
-                print(f"Lỗi Fatal trong Worker Loop: {e}")
+                print(f"Fatal error in Worker Loop: {e}")
 
     def _check_idle_timeout(self):
-        """Kiểm tra nếu không hoạt động quá lâu thì đóng trình duyệt"""
+        """Check if inactive for too long then close browser"""
         if self.ready and (time.time() - self.last_activity > SHUTDOWN_TIMEOUT):
             print(
-                f"--- Timeout {SESSION_TIMEOUT_MINUTES}p. Đóng trình duyệt để giải phóng RAM. ---")
+                f"--- Timeout {SESSION_TIMEOUT_MINUTES}m. Closing browser to free up RAM. ---")
             self._shutdown_browser()
 
     def _init_browser(self):
-        """Khởi tạo Playwright (Chỉ chạy trong Worker Thread)"""
+        """Initialize Playwright (Only runs in Worker Thread)"""
         if self.ready:
             return True
 
-        print("--- Đang khởi tạo ChatGPT Browser... ---")
+        print("--- Initializing ChatGPT Browser... ---")
         try:
             self.playwright = sync_playwright().start()
             self.browser = self.playwright.chromium.launch(
@@ -145,45 +145,73 @@ class BrowserWorker(threading.Thread):
                     "--disable-setuid-sandbox",
                     "--disable-blink-features=AutomationControlled",
                     "--start-maximized",
+                    "--disable-infobars",
+                    "--disable-extensions",
                 ]
             )
 
             self.context = self.browser.new_context(
                 viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                locale="en-US",
+                timezone_id="America/New_York",
+                java_script_enabled=True,
+                bypass_csp=True,
+                extra_http_headers={
+                    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not=A?Brand";v="24"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"macOS"',
+                    "accept-language": "en-US,en;q=0.9",
+                }
             )
 
             self.page = self.context.new_page()
             stealth = Stealth()
             stealth.apply_stealth_sync(self.page)
 
-            print("Truy cập https://chatgpt.com ...")
+            print("Accessing https://chatgpt.com ...")
             self.page.goto("https://chatgpt.com", timeout=60000)
 
-            # Xử lý login Guest nếu có
-            try:
-                guest_btn = self.page.query_selector(
-                    'div.flex.flex-col.items-center.justify-center >> text=Stay logged out')
-                # Note: Selector guest thay đổi liên tục, dùng try/catch lỏng
-                if not guest_btn:
-                    # Thử tìm nút "Start chatting" hoặc tương tự
-                    pass
-            except:
-                pass
+            # Wait for page to fully load
+            self.page.wait_for_load_state("domcontentloaded")
+            # Additional wait (OpenAI sometimes loads slowly)
+            time.sleep(5)
 
-            time.sleep(3)
+            # Handle Guest login if present
+            try:
+                login_prompt = self.page.query_selector(
+                    'div.flex.flex-col.items-center.justify-center.px-6.py-8')
+                if login_prompt:
+                    # Look for the "Continue as guest" link
+                    continue_as_guest = login_prompt.query_selector(
+                        'a.cursor-pointer')
+                    if continue_as_guest:
+                        # Get the bounding box for human-like clicking
+                        bbox = continue_as_guest.bounding_box()
+                        if bbox:
+                            center_x = bbox['x'] + bbox['width'] / 2
+                            center_y = bbox['y'] + bbox['height'] / 2
+                            simulate_human_click(self.page, center_x, center_y)
+                        else:
+                            # Fallback if we can't get bounding box
+                            continue_as_guest.click()
+                        # Wait a bit for the prompt to disappear
+                        time.sleep(2)
+            except:
+                pass  # If we can't handle the login prompt, continue anyway
+
             self.ready = True
             self.last_activity = time.time()
-            print("--- Khởi tạo thành công ---")
+            print("--- Initialization successful ---")
             return True
         except Exception as e:
-            print(f"Lỗi khởi tạo: {e}")
+            print(f"Initialization error: {e}")
             self._shutdown_browser()
             return False
 
     def _shutdown_browser(self):
-        """Đóng trình duyệt an toàn"""
-        print("--- Đang đóng trình duyệt... ---")
+        """Close browser safely"""
+        print("--- Closing browser... ---")
         if self.context:
             try:
                 self.context.close()
@@ -207,25 +235,25 @@ class BrowserWorker(threading.Thread):
         self.ready = False
 
     def _process_chat(self, message):
-        """Xử lý logic chat"""
+        """Process chat logic"""
         self.last_activity = time.time()
 
-        # 1. Đảm bảo browser đã mở
+        # 1. Ensure browser is open
         if not self._init_browser():
-            return {"error": "Không thể khởi tạo trình duyệt"}
+            return {"error": "Could not initialize browser"}
 
         try:
             page = self.page
 
-            # --- XỬ LÝ TEXTAREA ---
-            # Tăng timeout lên 10s
+            # --- PROCESS TEXTAREA ---
+            # Increase timeout to 10s
             try:
                 textarea = page.wait_for_selector(
                     'div.ProseMirror#prompt-textarea', state='visible', timeout=10000)
                 if not textarea:
-                    raise Exception("Không tìm thấy ô nhập liệu")
+                    raise Exception("Could not find input field")
             except:
-                # Fallback: Đôi khi class thay đổi, thử click vào body rồi tìm lại
+                # Fallback: Sometimes class changes, try clicking on body then search again
                 page.mouse.click(500, 500)
                 textarea = page.wait_for_selector(
                     '#prompt-textarea', state='visible', timeout=5000)
@@ -233,57 +261,77 @@ class BrowserWorker(threading.Thread):
             simulate_human_typing(
                 page, 'div.ProseMirror#prompt-textarea', message)
 
-            # Click gửi
+            # Click send
             send_btn = page.query_selector('button[data-testid="send-button"]')
             if send_btn:
                 send_btn.click()
             else:
                 page.keyboard.press("Enter")
 
-            # --- CHỜ VÀ LẤY PHẢN HỒI ---
-            # Logic: Chờ nút Stop xuất hiện (đang gen) -> Chờ nút Stop biến mất (đã gen xong)
+            # Show loading indicator with animation
+            loading_chars = ["⠋", "⠙", "⠹", "⠸",
+                             "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            loading_index = 0
+
+            # Wait for the response to complete with visual feedback
+            response_started = False
+            start_time = time.time()
+            timeout = 30  # seconds
+
             try:
+                # Wait for the stop button to appear (response started)
                 page.wait_for_selector(
                     'button[data-testid="stop-button"]', timeout=5000)
-            except:
-                pass  # Có thể nó gen quá nhanh
+                response_started = True
 
-            # Chờ nút Copy hoặc nút Regenerate xuất hiện (dấu hiệu xong)
-            # Hoặc đơn giản là đợi div markdown prose ổn định
-            time.sleep(2)
+                # Show loading animation while waiting for response to complete
+                while response_started and (time.time() - start_time) < timeout:
+                    try:
+                        # Check if stop button still exists
+                        stop_button = page.query_selector(
+                            'button[data-testid="stop-button"]')
 
-            # Tăng timeout chờ phản hồi lên 30s
-            try:
-                page.wait_for_selector('div.markdown.prose', timeout=30000)
-            except:
-                return {"error": "Timeout khi chờ phản hồi từ ChatGPT"}
+                        # If stop button is gone, response is complete
+                        if stop_button is None:
+                            response_started = False
+                            break
 
-            # Đợi thêm chút để render hết
-            timeout_count = 0
-            prev_len = 0
-            while timeout_count < 30:  # Đợi tối đa 30s cho việc generate text dài
-                responses = page.query_selector_all('div.markdown.prose')
-                if not responses:
-                    break
-                current_text = responses[-1].inner_text()
-                if len(current_text) > prev_len:
-                    prev_len = len(current_text)
-                    timeout_count = 0  # Reset nếu text vẫn đang dài ra
-                    time.sleep(1)
-                else:
-                    # Text không đổi trong 1s -> Có thể đã xong
-                    timeout_count += 1
-                    if timeout_count > 2:
+                        # Update loading animation
+                        loading_index += 1
+                        time.sleep(0.1)
+                    except:
+                        response_started = False
                         break
+            except:
+                # If we can't detect the stop button, show simple loading
+                time.sleep(2)  # Reduced from 3 to 2 seconds
 
-            final_responses = page.query_selector_all('div.markdown.prose')
-            if final_responses:
-                return {"response": final_responses[-1].inner_text()}
-            else:
-                return {"error": "Không lấy được nội dung phản hồi"}
+            # Try to extract the latest response
+            try:
+                # Wait for response elements to appear
+                page.wait_for_selector(
+                    'div.markdown.prose', timeout=10000)
+
+                # Reduce the wait time for the text to fully render
+                time.sleep(0.5)
+
+                # Get all response elements
+                response_elements = page.query_selector_all(
+                    'div.markdown.prose')
+
+                if response_elements:
+                    # Get the last response (most recent one)
+                    latest_response = response_elements[-1]
+                    response_text = latest_response.inner_text()
+                    return {"response": response_text}
+                else:
+                    return {"error": "Could not find response from ChatGPT."}
+
+            except Exception as response_error:
+                return {"error": f"Could not extract response: {response_error}"}
 
         except Exception as e:
-            print(f"Lỗi trong quá trình chat: {e}")
+            print(f"Error during chat process: {e}")
             self._shutdown_browser()  # Reset nếu lỗi
             return {"error": str(e)}
 
@@ -304,20 +352,20 @@ def chat_endpoint():
 
     message = data['message']
 
-    # Cơ chế giao tiếp Thread-safe:
-    # 1. Tạo hàng đợi kết quả riêng cho request này
+    # Thread-safe communication mechanism:
+    # 1. Create a separate result queue for this request
     result_queue = queue.Queue()
 
-    # 2. Gửi task sang Worker Thread
+    # 2. Send task to Worker Thread
     browser_worker.task_queue.put({
         'type': 'chat',
         'message': message,
         'result_queue': result_queue
     })
 
-    # 3. Chờ kết quả (Block request này cho đến khi Worker trả lời)
+    # 3. Wait for result (Block this request until Worker responds)
     try:
-        # Timeout tổng 120s cho cả quá trình
+        # Total timeout of 120s for the entire process
         result = result_queue.get(timeout=120)
         if 'error' in result:
             return jsonify(result), 500
@@ -333,7 +381,7 @@ def health():
 
 
 def signal_handler(sig, frame):
-    print("\nĐang tắt server...")
+    print("\nShutting down server...")
     if browser_worker:
         browser_worker.task_queue.put({'type': 'shutdown_app'})
         browser_worker.join(timeout=5)
@@ -343,11 +391,11 @@ def signal_handler(sig, frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Khởi chạy Worker Thread
+    # Start Worker Thread
     browser_worker = BrowserWorker()
     browser_worker.start()
 
     print(
-        f"Server chạy port 5001. Timeout phiên: {SESSION_TIMEOUT_MINUTES} phút")
-    # Threaded=True ok vì Browser logic đã tách biệt hoàn toàn
+        f"Server running on port 5001. Session timeout: {SESSION_TIMEOUT_MINUTES} minutes")
+    # Threaded=True is ok because Browser logic is completely separated
     app.run(host='0.0.0.0', port=5001, threaded=True)
