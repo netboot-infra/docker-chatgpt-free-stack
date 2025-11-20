@@ -16,7 +16,7 @@ from flask import Flask, request, jsonify
 # ----------------------------------------------------------------------
 SESSION_TIMEOUT_MINUTES = 12  # Increased to 12 minutes to reduce login frequency
 SHUTDOWN_TIMEOUT = SESSION_TIMEOUT_MINUTES * 60
-HEADLESS_MODE = True        # Set to True if running on a server without a display
+HEADLESS_MODE = False        # Set to True if running on a server without a display
 
 # ----------------------------------------------------------------------
 #                  HÀM MÔ PHỎNG HÀNH VI (GIỮ NGUYÊN)
