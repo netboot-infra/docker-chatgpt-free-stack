@@ -19,7 +19,7 @@ from flask_cors import CORS
 # ----------------------------------------------------------------------
 SESSION_TIMEOUT_MINUTES = 12  # Increased to 12 minutes to reduce login frequency
 SHUTDOWN_TIMEOUT = SESSION_TIMEOUT_MINUTES * 60
-HEADLESS_MODE = True        # Set to True if running on a server without a display
+HEADLESS_MODE = False        # Set to True if running on a server without a display
 
 # --- AUTHENTICATION CONFIG ---
 # Lấy key từ biến môi trường hoặc dùng key mặc định
@@ -101,6 +101,7 @@ class BrowserWorker(threading.Thread):
         self.ready = False
         self.last_activity = time.time()
         self.is_running = True
+        self.sysprompt_sent = False  # Track if sysprompt has been sent
 
     def run(self):
         print("--- Browser Worker Thread Started ---")
@@ -210,6 +211,7 @@ class BrowserWorker(threading.Thread):
 
             self.ready = True
             self.last_activity = time.time()
+            self.sysprompt_sent = False  # Reset sysprompt sent flag on new browser session
             print("--- Initialization successful ---")
             return True
         except Exception as e:
@@ -242,6 +244,80 @@ class BrowserWorker(threading.Thread):
         self.page = None
         self.ready = False
 
+    def _send_message(self, message, human_typing=True):
+        """Send a message to ChatGPT"""
+        page = self.page
+
+        # --- PROCESS TEXTAREA ---
+        # Increase timeout to 10s
+        try:
+            textarea = page.wait_for_selector(
+                'div.ProseMirror#prompt-textarea', state='visible', timeout=10000)
+            if not textarea:
+                raise Exception("Could not find input field")
+        except:
+            # Fallback: Sometimes class changes, try clicking on body then search again
+            page.mouse.click(500, 500)
+            textarea = page.wait_for_selector(
+                '#prompt-textarea', state='visible', timeout=5000)
+
+        # Fill textarea directly or simulate human typing based on flag
+        if human_typing:
+            simulate_human_typing(
+                page, 'div.ProseMirror#prompt-textarea', message)
+        else:
+            # Fill directly without human simulation
+            textarea.fill(message)
+
+        # Click send
+        send_btn = page.query_selector('button[data-testid="send-button"]')
+        if send_btn:
+            send_btn.click()
+        else:
+            page.keyboard.press("Enter")
+
+    def _wait_for_response(self):
+        """Wait for ChatGPT response to complete"""
+        page = self.page
+
+        # Show loading indicator with animation
+        loading_chars = ["⠋", "⠙", "⠹", "⠸",
+                         "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        loading_index = 0
+
+        # Wait for the response to complete with visual feedback
+        response_started = False
+        start_time = time.time()
+        timeout = 30  # seconds
+
+        try:
+            # Wait for the stop button to appear (response started)
+            page.wait_for_selector(
+                'button[data-testid="stop-button"]', timeout=5000)
+            response_started = True
+
+            # Show loading animation while waiting for response to complete
+            while response_started and (time.time() - start_time) < timeout:
+                try:
+                    # Check if stop button still exists
+                    stop_button = page.query_selector(
+                        'button[data-testid="stop-button"]')
+
+                    # If stop button is gone, response is complete
+                    if stop_button is None:
+                        response_started = False
+                        break
+
+                    # Update loading animation
+                    loading_index += 1
+                    time.sleep(0.1)
+                except:
+                    response_started = False
+                    break
+        except:
+            # If we can't detect the stop button, show simple loading
+            time.sleep(2)  # Reduced from 3 to 2 seconds
+
     def _process_chat(self, message):
         """Process chat logic"""
         self.last_activity = time.time()
@@ -252,6 +328,27 @@ class BrowserWorker(threading.Thread):
 
         try:
             page = self.page
+
+            # Send sysprompt as the first message if not already sent
+            if not self.sysprompt_sent:
+                try:
+                    # Read entire sysprompt file once and send it
+                    try:
+                        with open('sysprompt.txt', 'r', encoding='utf-8') as f:
+                            sysprompt_content = f.read()
+                        if sysprompt_content.strip():
+                            print("Sending system prompt as first message...")
+                            self._send_message(
+                                sysprompt_content, human_typing=False)
+                            # Wait for response to complete
+                            self._wait_for_response()
+                    except FileNotFoundError:
+                        print(
+                            "sysprompt.txt not found, continuing without system prompt...")
+                except Exception as e:
+                    print(f"Error sending system prompt: {e}")
+                finally:
+                    self.sysprompt_sent = True
 
             # Check for rate limit modal and handle it
             try:
@@ -271,66 +368,9 @@ class BrowserWorker(threading.Thread):
                 print(f"Error handling rate limit modal: {modal_error}")
                 pass  # Continue anyway if we can't handle the modal
 
-            # --- PROCESS TEXTAREA ---
-            # Increase timeout to 10s
-            try:
-                textarea = page.wait_for_selector(
-                    'div.ProseMirror#prompt-textarea', state='visible', timeout=10000)
-                if not textarea:
-                    raise Exception("Could not find input field")
-            except:
-                # Fallback: Sometimes class changes, try clicking on body then search again
-                page.mouse.click(500, 500)
-                textarea = page.wait_for_selector(
-                    '#prompt-textarea', state='visible', timeout=5000)
-
-            simulate_human_typing(
-                page, 'div.ProseMirror#prompt-textarea', message)
-
-            # Click send
-            send_btn = page.query_selector('button[data-testid="send-button"]')
-            if send_btn:
-                send_btn.click()
-            else:
-                page.keyboard.press("Enter")
-
-            # Show loading indicator with animation
-            loading_chars = ["⠋", "⠙", "⠹", "⠸",
-                             "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-            loading_index = 0
-
-            # Wait for the response to complete with visual feedback
-            response_started = False
-            start_time = time.time()
-            timeout = 30  # seconds
-
-            try:
-                # Wait for the stop button to appear (response started)
-                page.wait_for_selector(
-                    'button[data-testid="stop-button"]', timeout=5000)
-                response_started = True
-
-                # Show loading animation while waiting for response to complete
-                while response_started and (time.time() - start_time) < timeout:
-                    try:
-                        # Check if stop button still exists
-                        stop_button = page.query_selector(
-                            'button[data-testid="stop-button"]')
-
-                        # If stop button is gone, response is complete
-                        if stop_button is None:
-                            response_started = False
-                            break
-
-                        # Update loading animation
-                        loading_index += 1
-                        time.sleep(0.1)
-                    except:
-                        response_started = False
-                        break
-            except:
-                # If we can't detect the stop button, show simple loading
-                time.sleep(2)  # Reduced from 3 to 2 seconds
+            # Send user message and wait for response
+            self._send_message(message)
+            self._wait_for_response()
 
             # Try to extract the latest response
             try:
