@@ -9,14 +9,22 @@ import signal
 import threading
 import queue
 import uuid
-from flask import Flask, request, jsonify
-
+import os  # Bổ sung
+from functools import wraps  # Bổ sung
+from flask import Flask, request, jsonify, Response
+import json
+from flask_cors import CORS
 # ----------------------------------------------------------------------
 #                          CONFIGURATION
 # ----------------------------------------------------------------------
 SESSION_TIMEOUT_MINUTES = 12  # Increased to 12 minutes to reduce login frequency
 SHUTDOWN_TIMEOUT = SESSION_TIMEOUT_MINUTES * 60
 HEADLESS_MODE = True        # Set to True if running on a server without a display
+
+# --- AUTHENTICATION CONFIG ---
+# Lấy key từ biến môi trường hoặc dùng key mặc định
+API_TOKEN = os.environ.get(
+    "CHATGPT_API_KEY", "dung1234aA@$")
 
 # ----------------------------------------------------------------------
 #                  HÀM MÔ PHỎNG HÀNH VI (GIỮ NGUYÊN)
@@ -341,37 +349,63 @@ class BrowserWorker(threading.Thread):
 
 
 app = Flask(__name__)
+CORS(app)
+app.config['JSON_AS_ASCII'] = False
 browser_worker = None
+
+# --- BỔ SUNG: Hàm xác thực ---
+
+
+def require_api_key(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        key_from_header = request.headers.get('X-API-KEY')
+        # Kiểm tra Key từ header với Key trong config
+        if key_from_header and key_from_header == API_TOKEN:
+            return f(*args, **kwargs)
+        else:
+            return jsonify({'error': 'Unauthorized: Invalid or missing API Key'}), 401
+    return decorated_function
 
 
 @app.route('/chat', methods=['POST'])
+@require_api_key
 def chat_endpoint():
     data = request.get_json()
     if not data or 'message' not in data:
-        return jsonify({'error': 'Missing message'}), 400
+        return Response(
+            json.dumps({'error': 'Missing message'}, ensure_ascii=False),
+            mimetype='application/json'
+        ), 400
 
     message = data['message']
 
-    # Thread-safe communication mechanism:
-    # 1. Create a separate result queue for this request
     result_queue = queue.Queue()
 
-    # 2. Send task to Worker Thread
     browser_worker.task_queue.put({
         'type': 'chat',
         'message': message,
         'result_queue': result_queue
     })
 
-    # 3. Wait for result (Block this request until Worker responds)
     try:
-        # Total timeout of 120s for the entire process
         result = result_queue.get(timeout=120)
         if 'error' in result:
-            return jsonify(result), 500
-        return jsonify(result)
+            return Response(
+                json.dumps(result, ensure_ascii=False),
+                mimetype='application/json'
+            ), 500
+
+        return Response(
+            json.dumps(result, ensure_ascii=False),
+            mimetype='application/json'
+        )
     except queue.Empty:
-        return jsonify({'error': 'Server busy or timeout'}), 504
+        return Response(
+            json.dumps({'error': 'Server busy or timeout'},
+                       ensure_ascii=False),
+            mimetype='application/json'
+        ), 504
 
 
 @app.route('/health', methods=['GET'])
@@ -389,6 +423,9 @@ def signal_handler(sig, frame):
 
 
 if __name__ == "__main__":
+    import signal
+    from waitress import serve
+
     signal.signal(signal.SIGINT, signal_handler)
 
     # Start Worker Thread
@@ -397,5 +434,8 @@ if __name__ == "__main__":
 
     print(
         f"Server running on port 5001. Session timeout: {SESSION_TIMEOUT_MINUTES} minutes")
-    # Threaded=True is ok because Browser logic is completely separated
-    app.run(host='0.0.0.0', port=5001, threaded=True)
+    # --- BỔ SUNG: In key ra màn hình ---
+    print(f"Auth Enabled. Key: {API_TOKEN}")
+
+    # Serve Flask app via Waitress (production)
+    serve(app, host='0.0.0.0', port=5001, threads=4)
