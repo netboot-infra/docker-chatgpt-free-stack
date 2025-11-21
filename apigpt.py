@@ -253,6 +253,24 @@ class BrowserWorker(threading.Thread):
         try:
             page = self.page
 
+            # Check for rate limit modal and handle it
+            try:
+                rate_limit_modal = page.query_selector(
+                    'div[data-testid="modal-no-auth-rate-limit"]')
+                if rate_limit_modal:
+                    # Look for the "Stay logged out" link
+                    stay_logged_out = rate_limit_modal.query_selector(
+                        'a.cursor-pointer')
+                    if stay_logged_out:
+                        print(
+                            "Clicking 'Stay logged out' to dismiss rate limit modal...")
+                        stay_logged_out.click()
+                        # Wait a bit for the modal to disappear
+                        time.sleep(2)
+            except Exception as modal_error:
+                print(f"Error handling rate limit modal: {modal_error}")
+                pass  # Continue anyway if we can't handle the modal
+
             # --- PROCESS TEXTAREA ---
             # Increase timeout to 10s
             try:
@@ -331,7 +349,11 @@ class BrowserWorker(threading.Thread):
                     # Get the last response (most recent one)
                     latest_response = response_elements[-1]
                     response_text = latest_response.inner_text()
-                    return {"response": response_text}
+
+                    # Standardize the response text by removing newlines and extra whitespace
+                    standardized_response = ' '.join(response_text.split())
+
+                    return {"response": standardized_response}
                 else:
                     return {"error": "Could not find response from ChatGPT."}
 
