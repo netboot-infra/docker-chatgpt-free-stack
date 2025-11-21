@@ -61,26 +61,26 @@ def simulate_human_click(page, x, y):
 def simulate_human_typing(page, selector, text):
     """Simulate human-like typing"""
     page.click(selector)
-    time.sleep(random.uniform(0.2, 0.5))
+    time.sleep(random.uniform(0.1, 0.3))
     typed_text = ""
     for char in text:
         if random.random() < 0.02:  # 2% chance of typo
             wrong_char = random.choice("abcdefghijklmnopqrstuvwxyz")
             page.type(selector, wrong_char)
             typed_text += wrong_char
-            time.sleep(random.uniform(0.1, 0.3))
+            time.sleep(random.uniform(0.05, 0.15))
             page.press(selector, "Backspace")
             typed_text = typed_text[:-1]
-            time.sleep(random.uniform(0.1, 0.2))
+            time.sleep(random.uniform(0.05, 0.1))
 
         page.type(selector, char)
         typed_text += char
         if char == " ":
-            time.sleep(random.uniform(0.1, 0.3))
+            time.sleep(random.uniform(0.05, 0.15))
         elif char in ",.!?:;":
-            time.sleep(random.uniform(0.2, 0.4))
+            time.sleep(random.uniform(0.1, 0.2))
         else:
-            time.sleep(random.uniform(0.05, 0.2))
+            time.sleep(random.uniform(0.02, 0.1))
     return typed_text
 
 # ----------------------------------------------------------------------
