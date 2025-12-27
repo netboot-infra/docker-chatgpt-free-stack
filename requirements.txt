@@ -1,3 +1,5 @@
 playwright==1.56.0
 playwright-stealth==2.0.0
 flask==3.1.2
+flask_cors
+waitress
