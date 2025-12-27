@@ -1,0 +1,62 @@
+name: Deploy Stack Deployment
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        push: false
+        tags: |
+          ghcr.io/netboot-infra/chatgpt-free:${{ github.ref_name }}
+
+    - name: Configure SSH for remote Docker host
+      env:
+        SSH_CONFIG: |
+          Host $REMOTE_DOCKER_HOST
+              HostName $REMOTE_DOCKER_HOST
+              User manager
+              IdentityFile ~/.ssh/docker.key
+        REMOTE_DOCKER_HOST: ${{ vars.REMOTE_DOCKER_HOST }}
+        REMOTE_DOCKER_SSH_PORT: ${{ vars.REMOTE_DOCKER_SSH_PORT }}
+        REMOTE_DOCKER_SSH_PUBLIC_KEY: ${{ vars.REMOTE_DOCKER_SSH_PUBLIC_KEY }}
+        REMOTE_DOCKER_SSH_PRIVATE_KEY: ${{ secrets.REMOTE_DOCKER_SSH_PRIVATE_KEY }}
+        SSH_KNOWN_HOSTS: "[$REMOTE_DOCKER_HOST]:$REMOTE_DOCKER_SSH_PORT $REMOTE_DOCKER_SSH_PUBLIC_KEY"
+      run: |
+        mkdir -m 0700 ~/.ssh
+        echo "\${SSH_CONFIG}" | envsubst | envsubst > ~/.ssh/config
+        echo "\${SSH_KNOWN_HOSTS}" | envsubst | envsubst > ~/.ssh/known_hosts
+        echo "${REMOTE_DOCKER_SSH_PRIVATE_KEY}" | base64 -d > ~/.ssh/docker.key
+        chmod 600 ~/.ssh/docker.key
+
+    - name: Test connection to remote Docker host
+      env:
+        DOCKER_HOST: "ssh://${{ vars.REMOTE_DOCKER_HOST }}:${{ vars.REMOTE_DOCKER_SSH_PORT }}"
+      run: docker version
+
+    - name: Print stack configuration
+      env:
+        # Gpt variables
+        GPT_IMAGE_TAG: ${{ github.ref_name }}
+        GPT_API_KEY: ${{ secrets.API_KEY }}
+      run: |
+        yq ea '. as $item ireduce ({}; . *+ $item)' docker-compose.yml | envsubst
+
+    - name: Deploy stack to remote Docker host
+      env:
+        # Global variables
+        DOCKER_HOST: "ssh://${{ vars.REMOTE_DOCKER_HOST }}:${{ vars.REMOTE_DOCKER_SSH_PORT }}"
+        # Gpt variables
+        GPT_IMAGE_TAG: ${{ github.ref_name }}
+        GPT_API_KEY: ${{ secrets.API_KEY }}
+      run: |
+        yq ea '. as $item ireduce ({}; . *+ $item)' docker-compose.yml | envsubst | docker stack deploy --compose-file - gpt
