@@ -19,7 +19,7 @@ from flask_cors import CORS
 # ----------------------------------------------------------------------
 SESSION_TIMEOUT_MINUTES = 12  # Increased to 12 minutes to reduce login frequency
 SHUTDOWN_TIMEOUT = SESSION_TIMEOUT_MINUTES * 60
-HEADLESS_MODE = False        # Set to True if running on a server without a display
+HEADLESS_MODE = True
 
 # --- AUTHENTICATION CONFIG ---
 # Lấy key từ biến môi trường hoặc dùng key mặc định
