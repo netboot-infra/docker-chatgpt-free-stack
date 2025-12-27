@@ -59,4 +59,5 @@ jobs:
         GPT_IMAGE_TAG: ${{ github.ref_name }}
         GPT_API_KEY: ${{ secrets.API_KEY }}
       run: |
+        docker pull ghcr.io/netboot-infra/chatgpt-free:${{ github.ref_name }}
         yq ea '. as $item ireduce ({}; . *+ $item)' docker-compose.yml | envsubst | docker stack deploy --compose-file - gpt
