@@ -15,8 +15,9 @@ jobs:
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
       with:
-        push: false
+        push: true
         tags: |
+          ghcr.io/netboot-infra/chatgpt-free:latest
           ghcr.io/netboot-infra/chatgpt-free:${{ github.ref_name }}
 
     - name: Configure SSH for remote Docker host
