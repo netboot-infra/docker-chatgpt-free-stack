@@ -1,26 +1,28 @@
-# 1. Sử dụng Image chính chủ của Playwright (Đã bao gồm Python, Chromium và Dependencies hệ thống)
-# Chọn phiên bản jammy (Ubuntu 22.04) để ổn định nhất
+# Use the official Playwright image (includes Python, Chromium, and system dependencies)
+# Choose the Jammy version (Ubuntu 22.04) for maximum stability
 FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
 WORKDIR /app
 
-# 2. Copy và cài đặt thư viện Python (Flask, etc...)
+# Update system packages and install Xvfb
+RUN apt update && apt install -y xvfb
+
+# Copy and install Python libraries (Flask, etc.)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 3. Cài đặt trình duyệt Chromium (Để đảm bảo version khớp 100%)
+# Install Chromium browser (ensures exact version match)
 RUN playwright install chromium
 
-# 4. Copy toàn bộ code của bạn vào
+# Copy the entire application code
 COPY . .
 
-# 5. Thiết lập biến môi trường
+# Set environment variables
 ENV HEADLESS_MODE=True
 ENV PYTHONUNBUFFERED=1
 
-# 6. Mở port
+# Expose application port
 EXPOSE 5001
 
-# 7. Chạy ứng dụng
+# Run the application
 CMD ["python", "apigpt.py"]
-
