@@ -1,9 +1,14 @@
-version: '3.8'
+networks:
+  backend: {}
 
 services:
-  chatgpt-api:
-    build: .
+  chatgpt-free:
+    image: ghcr.io/netboot-infra/chatgpt-free:${GPT_IMAGE_TAG}
     ports:
       - "5001:5001"
     environment:
-      - PYTHONUNBUFFERED=1
+      PYTHONUNBUFFERED: "1"
+      HEADLESS_MODE: "true"
+      API_KEY: "$GPT_API_KEY"
+    networks:
+      - backend
