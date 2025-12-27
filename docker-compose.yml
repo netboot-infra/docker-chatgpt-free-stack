@@ -2,7 +2,7 @@ networks:
   backend: {}
 
 services:
-  chatgpt-free:
+  service:
     image: ghcr.io/netboot-infra/chatgpt-free:${GPT_IMAGE_TAG}
     ports:
       - "5001:5001"
