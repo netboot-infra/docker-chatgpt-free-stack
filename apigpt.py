@@ -406,8 +406,10 @@ class BrowserWorker(threading.Thread):
             return {"error": str(e)}
 
     def reload_browser(self):
-        """Safely restart the browser session"""
+        """Safely reload the browser session"""
+        self.sysprompt_sent = False
         self.page.reload()
+
 
 # ----------------------------------------------------------------------
 #                        MAIN FLASK APP
