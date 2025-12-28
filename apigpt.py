@@ -405,10 +405,9 @@ class BrowserWorker(threading.Thread):
             self._shutdown_browser()  # Reset nếu lỗi
             return {"error": str(e)}
 
-    def restart_browser(self):
+    def reload_browser(self):
         """Safely restart the browser session"""
-        self._shutdown_browser()
-        self._init_browser()
+        self.page.reload()
 
 # ----------------------------------------------------------------------
 #                        MAIN FLASK APP
@@ -480,12 +479,12 @@ def health():
     status = "ready" if browser_worker.ready else "idle"
     return jsonify({'status': status})
 
-@app.route('/restart', methods=['POST'])
+@app.route('/reload', methods=['POST'])
 @require_api_key
-def restart_browser_endpoint():
+def reload_browser_endpoint():
     try:
-        browser_worker.restart_browser()
-        return jsonify({'status': 'Browser restarted successfully'})
+        browser_worker.reload_browser()
+        return jsonify({'status': 'Browser reloaded successfully'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
