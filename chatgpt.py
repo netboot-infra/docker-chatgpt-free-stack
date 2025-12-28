@@ -200,6 +200,13 @@ def open_chatgpt(debugBrowser=False):
                     break
 
                 # Check if user wants to restart the application
+                if user_input.lower() == 'reload':
+                    print("Reload web page...")
+                    page.reload()
+                    continue
+
+
+                # Check if user wants to restart the application
                 if user_input.lower() == 'restart':
                     print("Restarting application...")
                     browser.close()
@@ -354,5 +361,5 @@ def open_chatgpt(debugBrowser=False):
 
 if __name__ == "__main__":
     # Set debugBrowser=True to show browser, False to run headless
-    debugBrowser = False  # Change this to True if you want to see the browser
+    debugBrowser = True  # Change this to True if you want to see the browser
     open_chatgpt(debugBrowser)
