@@ -405,6 +405,11 @@ class BrowserWorker(threading.Thread):
             self._shutdown_browser()  # Reset nếu lỗi
             return {"error": str(e)}
 
+    def restart_browser(self):
+        """Safely restart the browser session"""
+        self._shutdown_browser()
+        self._init_browser()
+
 # ----------------------------------------------------------------------
 #                        MAIN FLASK APP
 # ----------------------------------------------------------------------
@@ -475,6 +480,15 @@ def health():
     status = "ready" if browser_worker.ready else "idle"
     return jsonify({'status': status})
 
+@app.route('/restart', methods=['POST'])
+@require_api_key
+def restart_browser_endpoint():
+    try:
+        browser_worker.restart_browser()
+        return jsonify({'status': 'Browser restarted successfully'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 def signal_handler(sig, frame):
     print("\nShutting down server...")
@@ -500,4 +514,4 @@ if __name__ == "__main__":
     print(f"Auth Enabled. Key: {API_TOKEN}")
 
     # Serve Flask app via Waitress (production)
-    serve(app, host='0.0.0.0', port=5001, threads=4)
+    serve(app, host='0.0.0.0', port=5001, threads=1)

@@ -1,5 +1,6 @@
 networks:
-  backend: {}
+  public:
+    external: true
 
 services:
   service:
@@ -11,4 +12,4 @@ services:
       HEADLESS_MODE: "true"
       API_KEY: "$GPT_API_KEY"
     networks:
-      - backend
+      - public
